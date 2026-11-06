@@ -1,0 +1,157 @@
+# Authored for the sealed build: upstream hazelcast 3.12.x ships no GitHub Actions CI.
+# Mirrors the project's documented build (README: `mvn clean install`) and its default
+# test profile (README: `mvn test` = QuickTest category, SlowTest/NightlyTest excluded),
+# on JDK 8 (the release's Build-Jdk 1.8.0_162). The QuickTest suite is several hours
+# long single-forked, so it is split into disjoint shards by test class; every test
+# class of every module lands in exactly one shard.
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Surefire -Dtest selector; empty runs the full suite"
+        required: false
+        default: ""
+
+env:
+  MAVEN_VERSION: 3.9.5
+  MAVEN_OPTS: -Xmx1g
+  MVN_ARGS: -B -V -e -Daether.connector.http.retryHandler.count=5 -Dstyle.color=never -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+
+jobs:
+  build:
+    name: build hazelcast-all (mvn install + failsafe ITs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+      - name: Cache Maven ${{ env.MAVEN_VERSION }} distribution
+        id: maven-dist
+        uses: actions/cache@v4
+        with:
+          path: ~/apache-maven-${{ env.MAVEN_VERSION }}
+          key: apache-maven-${{ env.MAVEN_VERSION }}
+      - name: Install Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          if [ ! -x "$HOME/apache-maven-${MAVEN_VERSION}/bin/mvn" ]; then
+            # Mirrors throttle bursts of runner downloads (HTTP 429 / connection reset): rotate and back off.
+            ok=""
+            for attempt in 1 2 3 4 5 6; do
+              for base in https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION} \
+                          https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries \
+                          https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}; do
+                if curl -fsSL -o /tmp/maven.tar.gz "$base/apache-maven-${MAVEN_VERSION}-bin.tar.gz" && tar tzf /tmp/maven.tar.gz >/dev/null; then
+                  ok=1; break 2
+                fi
+              done
+              sleep $((attempt * 15))
+            done
+            [ -n "$ok" ] || { echo "could not download Maven ${MAVEN_VERSION}"; exit 1; }
+            tar xzf /tmp/maven.tar.gz -C "$HOME"
+          fi
+          echo "$HOME/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - name: Build and install all modules, run the OSGi dependency ITs (failsafe)
+        # Unit tests (surefire) run in the sharded test jobs below; failsafe runs the
+        # *IT classes (CheckDependenciesIT / ClientCheckDependenciesIT / CheckAllDependenciesIT)
+        # against the packaged jars here.
+        run: mvn $MVN_ARGS clean install -Dtest=NoSuchSurefireTest -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false
+      - name: Print failsafe results
+        if: always()
+        run: python3 .github/scripts/seal-report.py "*/target/failsafe-reports"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hazelcast-all-jar
+          path: hazelcast-all/target/hazelcast-all-3.12.6.jar
+          if-no-files-found: error
+
+  test:
+    name: test ${{ matrix.module }} shard ${{ matrix.shard }}/${{ matrix.shards }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { module: hazelcast, shards: 10, shard: 1 }
+          - { module: hazelcast, shards: 10, shard: 2 }
+          - { module: hazelcast, shards: 10, shard: 3 }
+          - { module: hazelcast, shards: 10, shard: 4 }
+          - { module: hazelcast, shards: 10, shard: 5 }
+          - { module: hazelcast, shards: 10, shard: 6 }
+          - { module: hazelcast, shards: 10, shard: 7 }
+          - { module: hazelcast, shards: 10, shard: 8 }
+          - { module: hazelcast, shards: 10, shard: 9 }
+          - { module: hazelcast, shards: 10, shard: 10 }
+          - { module: hazelcast-client, shards: 3, shard: 1 }
+          - { module: hazelcast-client, shards: 3, shard: 2 }
+          - { module: hazelcast-client, shards: 3, shard: 3 }
+          - { module: "hazelcast-spring,hazelcast-build-utils", shards: 1, shard: 1 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+      - name: Cache Maven ${{ env.MAVEN_VERSION }} distribution
+        id: maven-dist
+        uses: actions/cache@v4
+        with:
+          path: ~/apache-maven-${{ env.MAVEN_VERSION }}
+          key: apache-maven-${{ env.MAVEN_VERSION }}
+      - name: Install Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          if [ ! -x "$HOME/apache-maven-${MAVEN_VERSION}/bin/mvn" ]; then
+            # Mirrors throttle bursts of runner downloads (HTTP 429 / connection reset): rotate and back off.
+            ok=""
+            for attempt in 1 2 3 4 5 6; do
+              for base in https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION} \
+                          https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries \
+                          https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}; do
+                if curl -fsSL -o /tmp/maven.tar.gz "$base/apache-maven-${MAVEN_VERSION}-bin.tar.gz" && tar tzf /tmp/maven.tar.gz >/dev/null; then
+                  ok=1; break 2
+                fi
+              done
+              sleep $((attempt * 15))
+            done
+            [ -n "$ok" ] || { echo "could not download Maven ${MAVEN_VERSION}"; exit 1; }
+            tar xzf /tmp/maven.tar.gz -C "$HOME"
+          fi
+          echo "$HOME/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - name: Build and install modules (tests run in the next step)
+        run: mvn $MVN_ARGS -q install -DskipTests -pl hazelcast,hazelcast-client,hazelcast-spring,hazelcast-build-utils -am
+      - name: Run unit tests (mvn test, default QuickTest profile)
+        env:
+          MODULE: ${{ matrix.module }}
+          SHARDS: ${{ matrix.shards }}
+          SHARD: ${{ matrix.shard }}
+          TEST_FILTER: ${{ inputs.test-filter }}
+        run: |
+          if [ -n "$TEST_FILTER" ]; then
+            if [ "$SHARD" = "1" ]; then
+              mvn $MVN_ARGS test -pl "$MODULE" -Dtest="$TEST_FILTER" -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false
+            else
+              echo "test-filter set: selected tests run in shard 1 of each module"
+            fi
+            exit 0
+          fi
+          EXTRA=""
+          if [ "$SHARDS" -gt 1 ]; then
+            # Round-robin every test source file of the module over the shards; this
+            # shard excludes all files assigned to the other shards (and their nested classes).
+            ( cd "$MODULE/src/test/java" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort ) > /tmp/all.txt
+            awk -v n="$SHARDS" -v i="$SHARD" '(NR-1)%n!=i-1' /tmp/all.txt \
+              | sed 's|\.java$||' | awk '{print $0".java"; print $0"$*"}' > /tmp/shard-excludes.txt
+            echo "test classes in this shard: $(( $(wc -l < /tmp/all.txt) - $(wc -l < /tmp/shard-excludes.txt) / 2 )) of $(wc -l < /tmp/all.txt) source files"
+            EXTRA="-Dsurefire.excludesFile=/tmp/shard-excludes.txt"
+          fi
+          mvn $MVN_ARGS test -pl "$MODULE" $EXTRA -Dsurefire.rerunFailingTestsCount=2
+      - name: Print test results and skipped tests
+        if: always()
+        run: python3 .github/scripts/seal-report.py "*/target/surefire-reports"
